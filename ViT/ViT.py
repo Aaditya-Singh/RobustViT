@@ -165,6 +165,7 @@ class PatchEmbed(nn.Module):
         x = self.proj(x).flatten(2).transpose(1, 2)
         return x
 
+
 class VisionTransformer(nn.Module):
     """ Vision Transformer
     """

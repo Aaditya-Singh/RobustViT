@@ -32,7 +32,7 @@ def load_state_dict(checkpoint_path, use_ema=False):
             state_dict = new_state_dict
         else:
             state_dict = checkpoint
-        _logger.info("Loaded {} from checkpoint '{}'".format(state_dict_key, checkpoint_path))
+        _print("Loaded {} from checkpoint '{}'".format(state_dict_key, checkpoint_path))
         return state_dict
     else:
         _logger.error("No checkpoint found at '{}'".format(checkpoint_path))
@@ -50,7 +50,7 @@ def resume_checkpoint(model, checkpoint_path, optimizer=None, loss_scaler=None, 
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
         if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
             if log_info:
-                _logger.info('Restoring model state from checkpoint...')
+                _print('Restoring model state from checkpoint...')
             new_state_dict = OrderedDict()
             for k, v in checkpoint['state_dict'].items():
                 name = k[7:] if k.startswith('module') else k
@@ -59,12 +59,12 @@ def resume_checkpoint(model, checkpoint_path, optimizer=None, loss_scaler=None, 
 
             if optimizer is not None and 'optimizer' in checkpoint:
                 if log_info:
-                    _logger.info('Restoring optimizer state from checkpoint...')
+                    _print('Restoring optimizer state from checkpoint...')
                 optimizer.load_state_dict(checkpoint['optimizer'])
 
             if loss_scaler is not None and loss_scaler.state_dict_key in checkpoint:
                 if log_info:
-                    _logger.info('Restoring AMP loss scaler state from checkpoint...')
+                    _print('Restoring AMP loss scaler state from checkpoint...')
                 loss_scaler.load_state_dict(checkpoint[loss_scaler.state_dict_key])
 
             if 'epoch' in checkpoint:
@@ -73,11 +73,11 @@ def resume_checkpoint(model, checkpoint_path, optimizer=None, loss_scaler=None, 
                     resume_epoch += 1  # start at the next epoch, old checkpoints incremented before save
 
             if log_info:
-                _logger.info("Loaded checkpoint '{}' (epoch {})".format(checkpoint_path, checkpoint['epoch']))
+                _print("Loaded checkpoint '{}' (epoch {})".format(checkpoint_path, checkpoint['epoch']))
         else:
             model.load_state_dict(checkpoint)
             if log_info:
-                _logger.info("Loaded checkpoint '{}'".format(checkpoint_path))
+                _print("Loaded checkpoint '{}'".format(checkpoint_path))
         return resume_epoch
     else:
         _logger.error("No checkpoint found at '{}'".format(checkpoint_path))
@@ -98,7 +98,7 @@ def load_pretrained(model, cfg=None, num_classes=1000, in_chans=3, filter_fn=Non
 
     if in_chans == 1:
         conv1_name = cfg['first_conv']
-        _logger.info('Converting first conv (%s) pretrained weights from 3 to 1 channel' % conv1_name)
+        _print('Converting first conv (%s) pretrained weights from 3 to 1 channel' % conv1_name)
         conv1_weight = state_dict[conv1_name + '.weight']
         # Some weights are in torch.half, ensure it's float for sum on CPU
         conv1_type = conv1_weight.dtype
@@ -126,7 +126,7 @@ def load_pretrained(model, cfg=None, num_classes=1000, in_chans=3, filter_fn=Non
         else:
             # NOTE this strategy should be better than random init, but there could be other combinations of
             # the original RGB input layer weights that'd work better for specific cases.
-            _logger.info('Repeating first conv (%s) weights in channel dim.' % conv1_name)
+            _print('Repeating first conv (%s) weights in channel dim.' % conv1_name)
             repeat = int(math.ceil(in_chans / 3))
             conv1_weight = conv1_weight.repeat(1, repeat, 1, 1)[:, :in_chans, :, :]
             conv1_weight *= (3 / float(in_chans))
@@ -292,4 +292,34 @@ def build_model_with_cfg(
                     assert False, f'Unknown feature class {feature_cls}'
         model = feature_cls(model, **feature_cfg)
 
+    return model
+
+
+def load_ssl_pretrained(
+    model,
+    pretrained,
+):
+    checkpoint = torch.load(pretrained, map_location='cpu')
+    # -- load other pretrained weights
+    if 'msn' in pretrained:
+        pretrained_dict = {k.replace('module.', ''): v for k, v in checkpoint['target_encoder'].items()}
+    elif 'mae' or 'deit' in pretrained:
+        pretrained_dict = {k.replace("module.", ""): v for k, v in checkpoint['model'].items()}
+    elif 'dino' in pretrained:
+        pretrained_dict = {k.replace("module.", ""): v for k, v in checkpoint.items()}
+    for k, v in model.state_dict().items():
+        if k not in pretrained_dict:
+            print(f'key "{k}" could not be found in loaded state dict')
+        elif pretrained_dict[k].shape != v.shape:
+            print(f'key "{k}" is of different shape in model and loaded state dict')
+            pretrained_dict[k] = v
+    msg = model.load_state_dict(pretrained_dict, strict=False)
+    # print(model)
+    print(f'loaded pretrained model with msg: {msg}')
+    try:
+        print(f'loaded pretrained model from epoch: {checkpoint["epoch"]} '
+                    f'path: {pretrained}')
+    except Exception:
+        pass
+    del checkpoint
     return model

@@ -14,15 +14,18 @@ import torch.optim
 import torch.multiprocessing as mp
 import torch.utils.data
 import torch.utils.data.distributed
+from torch.nn import DataParallel
+from torch.nn.parallel import DistributedDataParallel
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
-from tokencut_dataset import SegmentationDataset, VAL_PARTITION, TRAIN_PARTITION
+from tokencut_dataset import SegmentationDataset
+from robustness_dataset import RobustnessDataset
 
 # Uncomment the expected model below
 
 # ViT
-from ViT.ViT import vit_base_patch16_224 as vit
+# from ViT.ViT import vit_base_patch16_224 as vit
 # from ViT.ViT import vit_large_patch16_224 as vit
 
 # ViT-AugReg
@@ -30,8 +33,9 @@ from ViT.ViT import vit_base_patch16_224 as vit
 # from ViT.ViT_new import vit_base_patch16_224 as vit
 # from ViT.ViT_new import vit_large_patch16_224 as vit
 
-# DeiT
-# from ViT.ViT import deit_base_patch16_224 as vit
+# NOTE: DeiT class from MSN
+from ViT.helpers import load_ssl_pretrained
+from ViT.ViT import deit_base_patch16_224 as deit
 # from ViT.ViT import deit_small_patch16_224 as vit
 
 from ViT.explainer import generate_relevance, get_image_with_relevance
@@ -40,16 +44,20 @@ import cv2
 from torch.utils.tensorboard import SummaryWriter
 import json
 
-model_names = sorted(name for name in models.__dict__
-    if name.islower() and not name.startswith("__")
-    and callable(models.__dict__[name]))
-model_names.append("vit")
+# model_names = sorted(name for name in models.__dict__
+#     if name.islower() and not name.startswith("__")
+#     and callable(models.__dict__[name]))
+# model_names.append("vit")
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 parser.add_argument('--data', metavar='DATA',
                     help='path to dataset')
+parser.add_argument('--subset', metavar='SUBSET',
+                    help='path to subset file')
 parser.add_argument('--seg_data', metavar='SEG_DATA',
                     help='path to segmentation dataset')
+parser.add_argument('--val_data', metavar='VAL_DATA',
+                    help='path to validation dataset')                    
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
 parser.add_argument('--epochs', default=150, type=int, metavar='N',
@@ -74,8 +82,8 @@ parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
-parser.add_argument('--pretrained', dest='pretrained', action='store_true',
-                    help='use pre-trained model')
+parser.add_argument('--pretrained', dest='pretrained', type=str,
+                    help='path to pretrained model')
 parser.add_argument('--world-size', default=-1, type=int,
                     help='number of nodes for distributed training')
 parser.add_argument('--rank', default=-1, type=int,
@@ -109,10 +117,12 @@ parser.add_argument('--lambda_background', default=1, type=float,
                     help='coefficient of loss for segmentation background.')
 parser.add_argument('--lambda_foreground', default=0.3, type=float,
                     help='coefficient of loss for segmentation foreground.')
-parser.add_argument('--num_classes', default=500, type=int,
-                    help='coefficient of loss for segmentation foreground.')
+# parser.add_argument('--num_classes', default=500, type=int,
+#                     help='number of classes for classification.')
 parser.add_argument('--temperature', default=1, type=float,
                     help='temperature for softmax (mostly for DeiT).')
+parser.add_argument('--model-name', type=str, default='deit_small',
+    help='model architecture')
 
 best_loss = float('inf')
 
@@ -134,11 +144,9 @@ def main():
         if args.epochs != 150:
             args.experiment_folder = args.experiment_folder + f'_num_epochs_{args.epochs}'
 
-    if os.path.exists(args.experiment_folder):
-        raise Exception(f"Experiment path {args.experiment_folder} already exists!")
-    os.mkdir(args.experiment_folder)
-    os.mkdir(f'{args.experiment_folder}/train_samples')
-    os.mkdir(f'{args.experiment_folder}/val_samples')
+    os.makedirs(args.experiment_folder, exist_ok=True)
+    os.makedirs(f'{args.experiment_folder}/train_samples', exist_ok=True)
+    os.makedirs(f'{args.experiment_folder}/val_samples', exist_ok=True)
 
     with open(f'{args.experiment_folder}/commandline_args.txt', 'w') as f:
         json.dump(args.__dict__, f, indent=2)
@@ -191,11 +199,19 @@ def main_worker(gpu, ngpus_per_node, args):
             args.rank = args.rank * ngpus_per_node + gpu
         dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
                                 world_size=args.world_size, rank=args.rank)
+    
     # create model
     print("=> creating model")
-    model = vit(pretrained=True).cuda()
-    model.train()
-    print("done")
+    # NOTE: Load pretrained weights
+    model = deit(pretrained=False).cuda()
+    load_ssl_pretrained(model, args.pretrained)
+    print("=> model created")
+
+    print("=> creating original model")
+    orig_model = deit(pretrained=False).cuda()
+    load_ssl_pretrained(orig_model, args.pretrained)
+    orig_model.eval()
+    print("=> original model created")
 
     if not torch.cuda.is_available():
         print('using CPU, this will be slow')
@@ -211,19 +227,19 @@ def main_worker(gpu, ngpus_per_node, args):
             # ourselves based on the total number of GPUs we have
             args.batch_size = int(args.batch_size / ngpus_per_node)
             args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+            model = DistributedDataParallel(model, device_ids=[args.gpu])
         else:
             model.cuda()
             # DistributedDataParallel will divide and allocate batch_size to all
             # available GPUs if device_ids are not set
-            model = torch.nn.parallel.DistributedDataParallel(model)
+            model = DistributedDataParallel(model)
     elif args.gpu is not None:
         torch.cuda.set_device(args.gpu)
         model = model.cuda(args.gpu)
     else:
         # DataParallel will divide and allocate batch_size to all available GPUs
-        print("start")
-        model = torch.nn.DataParallel(model).cuda()
+        print("=> starting DataParallel")
+        model = DataParallel(model).cuda()
 
     # define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().cuda(args.gpu)
@@ -252,9 +268,8 @@ def main_worker(gpu, ngpus_per_node, args):
             print("=> no checkpoint found at '{}'".format(args.resume))
 
     cudnn.benchmark = True
-
-    train_dataset = SegmentationDataset(args.seg_data, args.data, partition=TRAIN_PARTITION, train_classes=args.num_classes,
-                                        num_samples=args.num_samples)
+    # NOTE: Load full ImaneNet subsets
+    train_dataset = SegmentationDataset(args.seg_data, args.data)
 
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
@@ -265,8 +280,8 @@ def main_worker(gpu, ngpus_per_node, args):
         train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
         num_workers=args.workers, pin_memory=True, sampler=train_sampler)
 
-    val_dataset = SegmentationDataset(args.seg_data, args.data, partition=VAL_PARTITION, train_classes=args.num_classes,
-                                      num_samples=1)
+    # NOTE: use IN1k val set for validation instead of partial subset
+    val_dataset = RobustnessDataset(args.val_data)
 
     val_loader = torch.utils.data.DataLoader(
         val_dataset, batch_size=10, shuffle=False,
@@ -286,26 +301,27 @@ def main_worker(gpu, ngpus_per_node, args):
         args.logger = logger
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, args)
+        train(train_loader, model, orig_model, criterion, optimizer, epoch, args)
 
-        # evaluate on validation set
-        loss1 = validate(val_loader, model, criterion, epoch, args)
+        # TODO: evaluate on validation set after every 10 (hardcoded) epochs
+        if (epoch + 1) % (args.epochs // 10) == 0:
+            loss1 = validate(val_loader, model, orig_model, criterion, epoch, args)
 
-        # remember best acc@1 and save checkpoint
-        is_best = loss1 <= best_loss
-        best_loss = min(loss1, best_loss)
+            # remember best acc@1 and save checkpoint
+            is_best = loss1 <= best_loss
+            best_loss = min(loss1, best_loss)
 
-        if not args.multiprocessing_distributed or (args.multiprocessing_distributed
-                and args.rank % ngpus_per_node == 0):
-            save_checkpoint({
-                'epoch': epoch + 1,
-                'state_dict': model.state_dict(),
-                'best_loss': best_loss,
-                'optimizer' : optimizer.state_dict(),
-            }, is_best, folder=args.experiment_folder)
+            if not args.multiprocessing_distributed or (args.multiprocessing_distributed
+                    and args.rank % ngpus_per_node == 0):
+                save_checkpoint({
+                    'epoch': epoch + 1,
+                    'state_dict': model.state_dict(),
+                    'best_loss': best_loss,
+                    'optimizer' : optimizer.state_dict(),
+                }, is_best, folder=args.experiment_folder)
 
 
-def train(train_loader, model, criterion, optimizer, epoch, args):
+def train(train_loader, model, orig_model, criterion, optimizer, epoch, args):
     mse_criterion = torch.nn.MSELoss(reduction='mean')
     losses = AverageMeter('Loss', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.2f')
@@ -318,9 +334,6 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         [losses, top1, top5, orig_top1, orig_top5],
         prefix="Epoch: [{}]".format(epoch))
 
-    orig_model = vit(pretrained=True).cuda()
-    orig_model.eval()
-
     # switch to train mode
     model.train()
 
@@ -332,10 +345,11 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
             seg_map = seg_map.cuda(args.gpu, non_blocking=True)
             class_name = class_name.cuda(args.gpu, non_blocking=True)
 
-        # compute output
-
         # segmentation loss
-        relevance = generate_relevance(model, image_ten, index=class_name)
+        if isinstance(model, DataParallel) or isinstance(model, DistributedDataParallel):
+            relevance = generate_relevance(model.module, image_ten, index=class_name)
+        else:
+            relevance = generate_relevance(model, image_ten, index=class_name)
 
         reverse_seg_map = seg_map.clone()
         reverse_seg_map[reverse_seg_map == 1] = -1
@@ -346,16 +360,14 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         segmentation_loss = args.lambda_background * background_loss
         segmentation_loss += args.lambda_foreground * foreground_loss
 
-        # classification loss
+        # NOTE: classification loss w.r.t ground truth labels
         output = model(image_ten)
-        with torch.no_grad():
-            output_orig = orig_model(image_ten)
-
-        _, pred = output.topk(1, 1, True, True)
-        pred = pred.flatten()
         if args.temperature != 1:
             output = output / args.temperature
-        classification_loss = criterion(output, pred)
+        # _, pred = output.topk(1, 1, True, True)
+        # pred = pred.flatten()
+        # classification_loss = criterion(output, pred)
+        classification_loss = criterion(output, class_name)
 
         loss = args.lambda_seg * segmentation_loss + args.lambda_acc * classification_loss
 
@@ -377,6 +389,8 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         top5.update(acc5[0], image_ten.size(0))
 
         # metrics for original vit
+        with torch.no_grad():
+            output_orig = orig_model(image_ten)        
         acc1_orig, acc5_orig = accuracy(output_orig, class_name, topk=(1, 5))
         orig_top1.update(acc1_orig[0], image_ten.size(0))
         orig_top5.update(acc5_orig[0], image_ten.size(0))
@@ -404,8 +418,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
                                    epoch * len(train_loader) + i)
 
 
-def validate(val_loader, model, criterion, epoch, args):
-    mse_criterion = torch.nn.MSELoss(reduction='mean')
+def validate(val_loader, model, orig_model, criterion, epoch, args):
     losses = AverageMeter('Loss', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.2f')
     top5 = AverageMeter('Acc@5', ':6.2f')
@@ -414,75 +427,40 @@ def validate(val_loader, model, criterion, epoch, args):
     progress = ProgressMeter(
         len(val_loader),
         [losses, top1, top5, orig_top1, orig_top5],
-        prefix="Epoch: [{}]".format(val_loader))
+        prefix="Epoch: [{}]".format(epoch))
 
     # switch to evaluate mode
     model.eval()
 
-    orig_model = vit(pretrained=True).cuda()
-    orig_model.eval()
-
     with torch.no_grad():
         end = time.time()
-        for i, (seg_map, image_ten, class_name) in enumerate(val_loader):
-            if args.gpu is not None:
-                image_ten = image_ten.cuda(args.gpu, non_blocking=True)
+        for i, (images, target) in enumerate(val_loader):
+
             if torch.cuda.is_available():
-                seg_map = seg_map.cuda(args.gpu, non_blocking=True)
-                class_name = class_name.cuda(args.gpu, non_blocking=True)
+                images = images.cuda(args.gpu, non_blocking=True)
+                target = target.cuda(args.gpu, non_blocking=True)
 
-                # segmentation loss
-                with torch.enable_grad():
-                    relevance = generate_relevance(model, image_ten, index=class_name)
-
-                reverse_seg_map = seg_map.clone()
-                reverse_seg_map[reverse_seg_map == 1] = -1
-                reverse_seg_map[reverse_seg_map == 0] = 1
-                reverse_seg_map[reverse_seg_map == -1] = 0
-                background_loss = mse_criterion(relevance * reverse_seg_map, torch.zeros_like(relevance))
-                foreground_loss = mse_criterion(relevance * seg_map, seg_map)
-                segmentation_loss = args.lambda_background * background_loss
-                segmentation_loss += args.lambda_foreground * foreground_loss
-
-                # classification loss
-                with torch.no_grad():
-                    output = model(image_ten)
-                    output_orig = orig_model(image_ten)
-
-                _, pred = output.topk(1, 1, True, True)
-                pred = pred.flatten()
-                if args.temperature != 1:
-                    output = output / args.temperature
-                classification_loss = criterion(output, pred)
-                loss = args.lambda_seg * segmentation_loss + args.lambda_acc * classification_loss
-
-            # save results
-            if i % args.save_interval == 0:
-                with torch.enable_grad():
-                    orig_relevance = generate_relevance(orig_model, image_ten, index=class_name)
-                for j in range(image_ten.shape[0]):
-                    image = get_image_with_relevance(image_ten[j], torch.ones_like(image_ten[j]))
-                    new_vis = get_image_with_relevance(image_ten[j], relevance[j])
-                    old_vis = get_image_with_relevance(image_ten[j], orig_relevance[j])
-                    gt = get_image_with_relevance(image_ten[j], seg_map[j])
-                    h_img = cv2.hconcat([image, gt, old_vis, new_vis])
-                    cv2.imwrite(f'{args.experiment_folder}/val_samples/res_{i}_{j}.jpg', h_img)
+            # NOTE: compute output and classification loss w.r.t class labels
+            output = model(images)
+            if args.temperature != 1:
+                output = output / args.temperature
+            classification_loss = criterion(output, target)
+            loss = args.lambda_acc * classification_loss
 
             # measure accuracy and record loss
-            acc1, acc5 = accuracy(output, class_name, topk=(1, 5))
-            losses.update(loss.item(), image_ten.size(0))
-            top1.update(acc1[0], image_ten.size(0))
-            top5.update(acc5[0], image_ten.size(0))
+            acc1, acc5 = accuracy(output, target, topk=(1, 5))
+            top1.update(acc1[0], images.size(0))
+            top5.update(acc5[0], images.size(0))
+            losses.update(loss.item(), images.size(0))
 
             # metrics for original vit
-            acc1_orig, acc5_orig = accuracy(output_orig, class_name, topk=(1, 5))
-            orig_top1.update(acc1_orig[0], image_ten.size(0))
-            orig_top5.update(acc5_orig[0], image_ten.size(0))
+            output_orig = orig_model(images)
+            acc1_orig, acc5_orig = accuracy(output_orig, target, topk=(1, 5))
+            orig_top1.update(acc1_orig[0], images.size(0))
+            orig_top5.update(acc5_orig[0], images.size(0))
 
             if i % args.print_freq == 0:
                 progress.display(i)
-                args.logger.add_scalar('{}/{}'.format('val', 'segmentation_loss'), segmentation_loss,
-                                       epoch * len(val_loader) + i)
                 args.logger.add_scalar('{}/{}'.format('val', 'classification_loss'), classification_loss,
                                        epoch * len(val_loader) + i)
                 args.logger.add_scalar('{}/{}'.format('val', 'orig_top1'), acc1_orig,
@@ -493,14 +471,12 @@ def validate(val_loader, model, criterion, epoch, args):
                                        epoch * len(val_loader) + i)
                 args.logger.add_scalar('{}/{}'.format('val', 'top5'), acc5,
                                        epoch * len(val_loader) + i)
-                args.logger.add_scalar('{}/{}'.format('val', 'tot_loss'), loss,
-                                       epoch * len(val_loader) + i)
 
         # TODO: this should also be done with the ProgressMeter
         print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
               .format(top1=top1, top5=top5))
 
-    return losses.avg
+    return top1.avg
 
 
 def save_checkpoint(state, is_best, folder, filename='checkpoint.pth.tar'):
@@ -548,6 +524,7 @@ class ProgressMeter(object):
         num_digits = len(str(num_batches // 1))
         fmt = '{:' + str(num_digits) + 'd}'
         return '[' + fmt + '/' + fmt.format(num_batches) + ']'
+
 
 def adjust_learning_rate(optimizer, epoch, args):
     """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""

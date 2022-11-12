@@ -21,7 +21,7 @@ import torchvision.models as models
 # Uncomment the expected model below
 
 # ViT
-from ViT.ViT import vit_base_patch16_224 as vit
+# from ViT.ViT import vit_base_patch16_224 as vit
 # from ViT.ViT import vit_large_patch16_224 as vit
 
 # ViT-AugReg
@@ -30,7 +30,7 @@ from ViT.ViT import vit_base_patch16_224 as vit
 # from ViT.ViT_new import vit_large_patch16_224 as vit
 
 # DeiT
-# from ViT.ViT import deit_base_patch16_224 as vit
+from ViT.ViT import deit_base_patch16_224 as vit
 # from ViT.ViT import deit_small_patch16_224 as vit
 
 from robustness_dataset import RobustnessDataset
@@ -152,7 +152,8 @@ def main_worker(gpu, ngpus_per_node, args):
     if args.checkpoint:
         model = vit().cuda()
         checkpoint = torch.load(args.checkpoint)
-        model.load_state_dict(checkpoint['state_dict'])
+        pretrained_dict = {k.replace('module.', ''): v for k, v in checkpoint['state_dict'].items()}
+        model.load_state_dict(pretrained_dict)
     else:
         model = vit(pretrained=True).cuda()
     print("done")
