@@ -228,9 +228,11 @@ class VisionTransformer(nn.Module):
                 x, attn = blk(x, register_hook=register_hook, return_attentions=True)
                 attentions.append(attn)
 
-        x = self.norm(x)
+        if self.norm is not None:
+            x = self.norm(x)
         x = x[:, 0]
-        x = self.head(x)
+        if self.head is not None:
+            x = self.head(x)
 
         if not return_attentions:
             return x
@@ -269,6 +271,7 @@ def vit_base_finetuned_patch16_224(pretrained=False, **kwargs):
             model, num_classes=model.num_classes, in_chans=kwargs.get('in_chans', 3), filter_fn=_conv_filter)
     return model
 
+
 def vit_large_patch16_224(pretrained=False, **kwargs):
     model = VisionTransformer(
         patch_size=16, embed_dim=1024, depth=24, num_heads=16, mlp_ratio=4, qkv_bias=True,
@@ -277,6 +280,7 @@ def vit_large_patch16_224(pretrained=False, **kwargs):
     if pretrained:
         load_pretrained(model, num_classes=model.num_classes, in_chans=kwargs.get('in_chans', 3))
     return model
+
 
 def deit_tiny_patch16_224(pretrained=False, **kwargs):
     model = VisionTransformer(
@@ -288,6 +292,7 @@ def deit_tiny_patch16_224(pretrained=False, **kwargs):
             model, num_classes=model.num_classes, in_chans=kwargs.get('in_chans', 3), filter_fn=lambda x: x['model'])
     return model
 
+
 def deit_small_patch16_224(pretrained=False, **kwargs):
     model = VisionTransformer(
         patch_size=16, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4, qkv_bias=True,
@@ -297,6 +302,7 @@ def deit_small_patch16_224(pretrained=False, **kwargs):
         load_pretrained(
             model, num_classes=model.num_classes, in_chans=kwargs.get('in_chans', 3), filter_fn=lambda x: x['model'])
     return model
+
 
 def deit_base_patch16_224(pretrained=False, **kwargs):
     model = VisionTransformer(

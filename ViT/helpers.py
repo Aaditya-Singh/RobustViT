@@ -300,11 +300,13 @@ def load_ssl_pretrained(
     model,
     pretrained,
 ):
+    if pretrained is None: return
     checkpoint = torch.load(pretrained, map_location='cpu')
     # -- load other pretrained weights
     if 'msn' in pretrained:
         pretrained_dict = {k.replace('module.', ''): v for k, v in checkpoint['target_encoder'].items()}
-    elif 'mae' or 'deit' in pretrained:
+    elif 'mae' in pretrained or 'deit' in pretrained:
+        print(pretrained)
         pretrained_dict = {k.replace("module.", ""): v for k, v in checkpoint['model'].items()}
     elif 'dino' in pretrained:
         pretrained_dict = {k.replace("module.", ""): v for k, v in checkpoint.items()}
@@ -342,7 +344,7 @@ def init_distributed(port=40111, rank_and_world_size=(None, None)):
             rank = int(os.environ['SLURM_PROCID'])
             os.environ['MASTER_ADDR'] = os.environ['HOSTNAME']
         except Exception:
-            logger.info('SLURM vars not set (distributed training not available)')
+            _logger.info('SLURM vars not set (distributed training not available)')
             world_size, rank = 1, 0
             return world_size, rank
 
@@ -354,6 +356,24 @@ def init_distributed(port=40111, rank_and_world_size=(None, None)):
             rank=rank)
     except Exception:
         world_size, rank = 1, 0
-        logger.info('distributed training not available')
+        _logger.info('distributed training not available')
 
     return world_size, rank
+
+# -- linear classifier from https://github.com/facebookresearch/msn/
+class LinearClassifier(torch.nn.Module):
+
+    def __init__(self, dim, num_labels=1000, normalize=True):
+        super(LinearClassifier, self).__init__()
+        self.normalize = normalize
+        self.norm = torch.nn.LayerNorm(dim)
+        self.linear = torch.nn.Linear(dim, num_labels)
+        self.linear.weight.data.normal_(mean=0.0, std=0.01)
+        self.linear.bias.data.zero_()
+
+    def forward(self, x):
+        x = x.view(x.size(0), -1)  # flatten
+        x = self.norm(x)
+        if self.normalize:
+            x = torch.nn.functional.normalize(x)
+        return self.linear(x)

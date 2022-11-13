@@ -14,7 +14,7 @@ import torch.optim
 import torch.multiprocessing as mp
 import torch.utils.data
 import torch.utils.data.distributed
-from ViT.helpers import init_distributed
+from ViT.helpers import init_distributed, LinearClassifier
 from torch.nn.parallel import DistributedDataParallel
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
@@ -84,8 +84,8 @@ parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
 parser.add_argument('--pretrained', dest='pretrained', type=str, default=None,
                     help='path to pretrained model')
-# parser.add_argument('--linear_eval', dest='linear_eval', action='store_true',
-#                     help='whether to finetune head only')
+parser.add_argument('--linear_eval', dest='linear_eval', action='store_true',
+                    help='whether to finetune head only')
 parser.add_argument('--port', default=40111, type=int,
                     help='port for launching distributed training')                           
 parser.add_argument('--world-size', default=-1, type=int,
@@ -103,7 +103,7 @@ parser.add_argument('--gpu', default=None, type=int,
                     help='GPU id to use.')
 parser.add_argument('--save_interval', default=20, type=int,
                     help='interval to save segmentation results.')
-parser.add_argument('--multiprocessing-distributed', action='store_true',
+parser.add_argument('--mp_distributed', action='store_true',
                     help='Use multi-processing distributed training to launch '
                          'N processes per node, which has N GPUs. This is the '
                          'fastest way to use PyTorch for either single node or '
@@ -120,11 +120,11 @@ parser.add_argument('--lambda_background', default=1, type=float,
                     help='coefficient of loss for segmentation background.')
 parser.add_argument('--lambda_foreground', default=0.3, type=float,
                     help='coefficient of loss for segmentation foreground.')
-# parser.add_argument('--num_classes', default=500, type=int,
-#                     help='number of classes for classification.')
+parser.add_argument('--num_classes', default=1000, type=int,
+                    help='number of classes for classification.')
 parser.add_argument('--temperature', default=1, type=float,
                     help='temperature for softmax (mostly for DeiT).')
-parser.add_argument('--model-name', type=str, default='deit_small',
+parser.add_argument('--model_name', type=str, default='deit_small',
     help='model architecture')
 
 best_loss = float('inf')
@@ -193,13 +193,18 @@ def main_worker(rank, port, world_size, args):
     
     # create model
     print("=> creating model")
-    # NOTE: Load pretrained weights
+    # NOTE: Load pretrained weights and match MSN's norm and classifier
     model = deit(pretrained=False).to(rank)
-    if args.pretrained:
-        load_ssl_pretrained(model, args.pretrained)
-    # if args.linear_eval:
-    #     for n, p in model.named_parameters():
-    #         if 'head' not in n and p.requires_grad: p.requires_grad_(False)
+    model.norm = None
+    emb_dim = 384 if 'small' in args.model_name else 768 if 'base' in \
+        args.model_name else 1024
+    model.head = LinearClassifier(dim=emb_dim, num_labels=args.num_classes)
+    load_ssl_pretrained(model, args.pretrained)
+    if args.linear_eval:
+        print("=> freezing model parameters except head")
+        args.lambda_seg = 0.
+        for n, p in model.named_parameters():
+            if 'head' not in n and p.requires_grad: p.requires_grad_(False)        
     n_params = sum(p.numel() for n, p in model.named_parameters() if p.requires_grad)    
     print(f"=> model created with {n_params} trainable parameters")
 
@@ -229,9 +234,14 @@ def main_worker(rank, port, world_size, args):
         orig_model.to(device)        
         print('using CPU, this will be slow')
 
-    # define loss function (criterion) and optimizer
-    criterion = nn.CrossEntropyLoss().cuda(args.gpu)
-    optimizer = torch.optim.AdamW(model.parameters(), args.lr, weight_decay=args.weight_decay)
+    # NOTE: define loss function and match MSN's optimizer configs
+    criterion = nn.CrossEntropyLoss()
+    if args.linear_eval:
+        optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, \
+            nesterov=True, momentum=args.momentum, weight_decay=args.weight_decay)
+    else:
+        optimizer = torch.optim.AdamW(model.parameters(), args.lr, \
+            weight_decay=args.weight_decay)        
 
     # optionally resume from a checkpoint
     if args.resume:
@@ -256,7 +266,7 @@ def main_worker(rank, port, world_size, args):
             print("=> no checkpoint found at '{}'".format(args.resume))
 
     cudnn.benchmark = True
-    # NOTE: Load full ImaneNet subsets
+    # NOTE: Load full ImageNet subsets
     train_dataset = SegmentationDataset(args.seg_data, args.data)
 
     if args.mp_distributed:
@@ -332,17 +342,20 @@ def train(train_loader, model, orig_model, criterion, optimizer, epoch, args, de
         class_name = class_name.to(device)
 
         # segmentation loss
-        model_wo_ddp = model.module if isinstance(model, DistributedDataParallel) else model  
-        relevance = generate_relevance(model_wo_ddp, image_ten, index=class_name, device=device)
+        if args.lambda_seg > 0.:
+            model_wo_ddp = model.module if isinstance(model, DistributedDataParallel) else model  
+            relevance = generate_relevance(model_wo_ddp, image_ten, index=class_name, device=device)
 
-        reverse_seg_map = seg_map.clone()
-        reverse_seg_map[reverse_seg_map == 1] = -1
-        reverse_seg_map[reverse_seg_map == 0] = 1
-        reverse_seg_map[reverse_seg_map == -1] = 0
-        background_loss = mse_criterion(relevance * reverse_seg_map, torch.zeros_like(relevance))
-        foreground_loss = mse_criterion(relevance * seg_map, seg_map)
-        segmentation_loss = args.lambda_background * background_loss
-        segmentation_loss += args.lambda_foreground * foreground_loss
+            reverse_seg_map = seg_map.clone()
+            reverse_seg_map[reverse_seg_map == 1] = -1
+            reverse_seg_map[reverse_seg_map == 0] = 1
+            reverse_seg_map[reverse_seg_map == -1] = 0
+            background_loss = mse_criterion(relevance * reverse_seg_map, torch.zeros_like(relevance))
+            foreground_loss = mse_criterion(relevance * seg_map, seg_map)
+            segmentation_loss = args.lambda_background * background_loss
+            segmentation_loss += args.lambda_foreground * foreground_loss
+        else:
+            segmentation_loss = 0.
 
         # NOTE: classification loss w.r.t ground truth labels
         output = model(image_ten)
@@ -356,7 +369,7 @@ def train(train_loader, model, orig_model, criterion, optimizer, epoch, args, de
         loss = args.lambda_seg * segmentation_loss + args.lambda_acc * classification_loss
 
         # debugging output
-        if i % args.save_interval == 0:
+        if i % args.save_interval == 0 and args.lambda_seg > 0.:
             orig_model_wo_ddp = orig_model.module if \
                 isinstance(orig_model, DistributedDataParallel) else orig_model
             orig_relevance = generate_relevance(orig_model_wo_ddp, image_ten, \
