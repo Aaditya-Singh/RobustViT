@@ -11,6 +11,7 @@ from typing import Callable
 
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 import torch.utils.model_zoo as model_zoo
 
 _logger = logging.getLogger(__name__)
@@ -307,6 +308,8 @@ def load_ssl_pretrained(
         pretrained_dict = {k.replace("module.", ""): v for k, v in checkpoint['model'].items()}
     elif 'dino' in pretrained:
         pretrained_dict = {k.replace("module.", ""): v for k, v in checkpoint.items()}
+    else:
+        pretrained_dict = {k.replace("module.", ""): v for k, v in checkpoint['state_dict'].items()}
     for k, v in model.state_dict().items():
         if k not in pretrained_dict:
             print(f'key "{k}" could not be found in loaded state dict')
@@ -323,3 +326,34 @@ def load_ssl_pretrained(
         pass
     del checkpoint
     return model
+
+
+def init_distributed(port=40111, rank_and_world_size=(None, None)):
+
+    if dist.is_available() and dist.is_initialized():
+        return dist.get_world_size(), dist.get_rank()
+
+    rank, world_size = rank_and_world_size
+    os.environ['MASTER_ADDR'] = 'localhost'
+
+    if (rank is None) or (world_size is None):
+        try:
+            world_size = int(os.environ['SLURM_NTASKS'])
+            rank = int(os.environ['SLURM_PROCID'])
+            os.environ['MASTER_ADDR'] = os.environ['HOSTNAME']
+        except Exception:
+            logger.info('SLURM vars not set (distributed training not available)')
+            world_size, rank = 1, 0
+            return world_size, rank
+
+    try:
+        os.environ['MASTER_PORT'] = str(port)
+        torch.distributed.init_process_group(
+            backend='nccl',
+            world_size=world_size,
+            rank=rank)
+    except Exception:
+        world_size, rank = 1, 0
+        logger.info('distributed training not available')
+
+    return world_size, rank

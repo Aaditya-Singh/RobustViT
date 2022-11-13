@@ -28,7 +28,7 @@ def upscale_relevance(relevance):
     relevance = relevance.reshape(-1, 1, 224, 224)
     return relevance
 
-def generate_relevance(model, input, index=None):
+def generate_relevance(model, input, index=None, device='cpu'):
     # a batch of samples
     batch_size = input.shape[0]
     output = model(input, register_hook=True)
@@ -43,7 +43,7 @@ def generate_relevance(model, input, index=None):
     model.zero_grad()
 
     num_tokens = model.blocks[0].attn.get_attention_map().shape[-1]
-    R = torch.eye(num_tokens, num_tokens).cuda()
+    R = torch.eye(num_tokens, num_tokens).to(device)
     R = R.unsqueeze(0).expand(batch_size, num_tokens, num_tokens)
     for i, blk in enumerate(model.blocks):
         grad = torch.autograd.grad(one_hot, [blk.attn.attention_map], retain_graph=True)[0]

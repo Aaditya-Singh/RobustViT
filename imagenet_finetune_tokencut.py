@@ -4,7 +4,7 @@ import random
 import shutil
 import time
 import warnings
-
+import pprint
 import torch
 import torch.nn as nn
 import torch.nn.parallel
@@ -14,7 +14,7 @@ import torch.optim
 import torch.multiprocessing as mp
 import torch.utils.data
 import torch.utils.data.distributed
-from torch.nn import DataParallel
+from ViT.helpers import init_distributed
 from torch.nn.parallel import DistributedDataParallel
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
@@ -57,7 +57,7 @@ parser.add_argument('--subset', metavar='SUBSET',
 parser.add_argument('--seg_data', metavar='SEG_DATA',
                     help='path to segmentation dataset')
 parser.add_argument('--val_data', metavar='VAL_DATA',
-                    help='path to validation dataset')                    
+                    help='path to validation dataset')                
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
 parser.add_argument('--epochs', default=150, type=int, metavar='N',
@@ -82,24 +82,27 @@ parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
-parser.add_argument('--pretrained', dest='pretrained', type=str,
+parser.add_argument('--pretrained', dest='pretrained', type=str, default=None,
                     help='path to pretrained model')
+# parser.add_argument('--linear_eval', dest='linear_eval', action='store_true',
+#                     help='whether to finetune head only')
+parser.add_argument('--port', default=40111, type=int,
+                    help='port for launching distributed training')                           
 parser.add_argument('--world-size', default=-1, type=int,
                     help='number of nodes for distributed training')
 parser.add_argument('--rank', default=-1, type=int,
                     help='node rank for distributed training')
-parser.add_argument('--dist-url', default='tcp://224.66.41.62:23456', type=str,
+parser.add_argument('--dist_on_itp', action='store_true')
+parser.add_argument('--dist-url', default='env://', type=str,
                     help='url used to set up distributed training')
-parser.add_argument('--dist-backend', default='nccl', type=str,
-                    help='distributed backend')
+# parser.add_argument('--dist-backend', default='nccl', type=str,
+#                     help='distributed backend')
 parser.add_argument('--seed', default=None, type=int,
                     help='seed for initializing training. ')
 parser.add_argument('--gpu', default=None, type=int,
                     help='GPU id to use.')
 parser.add_argument('--save_interval', default=20, type=int,
                     help='interval to save segmentation results.')
-parser.add_argument('--num_samples', default=3, type=int,
-                    help='number of samples per class for training')
 parser.add_argument('--multiprocessing-distributed', action='store_true',
                     help='Use multi-processing distributed training to launch '
                          'N processes per node, which has N GPUs. This is the '
@@ -128,7 +131,7 @@ best_loss = float('inf')
 
 def main():
     args = parser.parse_args()
-
+    pprint.pprint(args)
     if args.experiment_folder is None:
         args.experiment_folder = f'experiment/' \
                                  f'lr_{args.lr}_seg_{args.lambda_seg}_acc_{args.lambda_acc}' \
@@ -146,7 +149,6 @@ def main():
 
     os.makedirs(args.experiment_folder, exist_ok=True)
     os.makedirs(f'{args.experiment_folder}/train_samples', exist_ok=True)
-    os.makedirs(f'{args.experiment_folder}/val_samples', exist_ok=True)
 
     with open(f'{args.experiment_folder}/commandline_args.txt', 'w') as f:
         json.dump(args.__dict__, f, indent=2)
@@ -165,81 +167,67 @@ def main():
         warnings.warn('You have chosen a specific GPU. This will completely '
                       'disable data parallelism.')
 
-    if args.dist_url == "env://" and args.world_size == -1:
-        args.world_size = int(os.environ["WORLD_SIZE"])
-
-    args.distributed = args.world_size > 1 or args.multiprocessing_distributed
-
-    ngpus_per_node = torch.cuda.device_count()
-    if args.multiprocessing_distributed:
-        # Since we have ngpus_per_node processes per node, the total world_size
-        # needs to be adjusted accordingly
-        args.world_size = ngpus_per_node * args.world_size
+    num_gpus = torch.cuda.device_count()
+    args.mp_distributed = True if num_gpus > 1 else False
+    
+    if args.mp_distributed:
         # Use torch.multiprocessing.spawn to launch distributed processes: the
         # main_worker process function
-        mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args))
+        mp.spawn(main_worker, nprocs=num_gpus, args=(args.port, num_gpus, args))
     else:
         # Simply call main_worker function
-        main_worker(args.gpu, ngpus_per_node, args)
+        main_worker(args.gpu, num_gpus, args)
 
 
-def main_worker(gpu, ngpus_per_node, args):
+def main_worker(rank, port, world_size, args):
     global best_loss
-    args.gpu = gpu
 
     if args.gpu is not None:
         print("Use GPU: {} for training".format(args.gpu))
 
-    if args.distributed:
-        if args.dist_url == "env://" and args.rank == -1:
-            args.rank = int(os.environ["RANK"])
-        if args.multiprocessing_distributed:
-            # For multiprocessing distributed training, rank needs to be the
-            # global rank among all the processes
-            args.rank = args.rank * ngpus_per_node + gpu
-        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
-                                world_size=args.world_size, rank=args.rank)
+    if args.mp_distributed:
+        # For multiprocessing distributed training, rank needs to be the
+        # global rank among all the processes  
+        world_size, rank = init_distributed(port=port, \
+            rank_and_world_size=(rank, world_size))
     
     # create model
     print("=> creating model")
     # NOTE: Load pretrained weights
-    model = deit(pretrained=False).cuda()
-    load_ssl_pretrained(model, args.pretrained)
-    print("=> model created")
+    model = deit(pretrained=False).to(rank)
+    if args.pretrained:
+        load_ssl_pretrained(model, args.pretrained)
+    # if args.linear_eval:
+    #     for n, p in model.named_parameters():
+    #         if 'head' not in n and p.requires_grad: p.requires_grad_(False)
+    n_params = sum(p.numel() for n, p in model.named_parameters() if p.requires_grad)    
+    print(f"=> model created with {n_params} trainable parameters")
 
     print("=> creating original model")
-    orig_model = deit(pretrained=False).cuda()
+    orig_model = deit(pretrained=False).to(rank)
     load_ssl_pretrained(orig_model, args.pretrained)
     orig_model.eval()
     print("=> original model created")
 
-    if not torch.cuda.is_available():
-        print('using CPU, this will be slow')
-    elif args.distributed:
+    device = None
+    if args.gpu is not None:
+        device = args.gpu
+        model.to(device)
+        orig_model.to(device)
+    elif args.mp_distributed:
         # For multiprocessing distributed, DistributedDataParallel constructor
         # should always set the single device scope, otherwise,
         # DistributedDataParallel will use all available devices.
-        if args.gpu is not None:
-            torch.cuda.set_device(args.gpu)
-            model.cuda(args.gpu)
-            # When using a single GPU per process and per
-            # DistributedDataParallel, we need to divide the batch size
-            # ourselves based on the total number of GPUs we have
-            args.batch_size = int(args.batch_size / ngpus_per_node)
-            args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
-            model = DistributedDataParallel(model, device_ids=[args.gpu])
-        else:
-            model.cuda()
-            # DistributedDataParallel will divide and allocate batch_size to all
-            # available GPUs if device_ids are not set
-            model = DistributedDataParallel(model)
-    elif args.gpu is not None:
-        torch.cuda.set_device(args.gpu)
-        model = model.cuda(args.gpu)
+        device = rank
+        model.to(device)
+        orig_model.to(device)        
+        model = DistributedDataParallel(model)
+        orig_model = DistributedDataParallel(orig_model)
     else:
-        # DataParallel will divide and allocate batch_size to all available GPUs
-        print("=> starting DataParallel")
-        model = DataParallel(model).cuda()
+        device = 'cpu'
+        model.to(device)
+        orig_model.to(device)        
+        print('using CPU, this will be slow')
 
     # define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().cuda(args.gpu)
@@ -271,7 +259,7 @@ def main_worker(gpu, ngpus_per_node, args):
     # NOTE: Load full ImaneNet subsets
     train_dataset = SegmentationDataset(args.seg_data, args.data)
 
-    if args.distributed:
+    if args.mp_distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
     else:
         train_sampler = None
@@ -288,11 +276,11 @@ def main_worker(gpu, ngpus_per_node, args):
         num_workers=args.workers, pin_memory=True)
 
     if args.evaluate:
-        validate(val_loader, model, criterion, 0, args)
+        validate(val_loader, model, criterion, 0, args, device)
         return
 
     for epoch in range(args.start_epoch, args.epochs):
-        if args.distributed:
+        if args.mp_distributed:
             train_sampler.set_epoch(epoch)
         adjust_learning_rate(optimizer, epoch, args)
 
@@ -301,18 +289,17 @@ def main_worker(gpu, ngpus_per_node, args):
         args.logger = logger
 
         # train for one epoch
-        train(train_loader, model, orig_model, criterion, optimizer, epoch, args)
+        train(train_loader, model, orig_model, criterion, optimizer, epoch, args, device)
 
         # TODO: evaluate on validation set after every 10 (hardcoded) epochs
         if (epoch + 1) % (args.epochs // 10) == 0:
-            loss1 = validate(val_loader, model, orig_model, criterion, epoch, args)
+            loss1 = validate(val_loader, model, orig_model, criterion, epoch, args, device)
 
             # remember best acc@1 and save checkpoint
             is_best = loss1 <= best_loss
             best_loss = min(loss1, best_loss)
 
-            if not args.multiprocessing_distributed or (args.multiprocessing_distributed
-                    and args.rank % ngpus_per_node == 0):
+            if not args.mp_distributed or (args.mp_distributed and rank == 0):
                 save_checkpoint({
                     'epoch': epoch + 1,
                     'state_dict': model.state_dict(),
@@ -321,7 +308,7 @@ def main_worker(gpu, ngpus_per_node, args):
                 }, is_best, folder=args.experiment_folder)
 
 
-def train(train_loader, model, orig_model, criterion, optimizer, epoch, args):
+def train(train_loader, model, orig_model, criterion, optimizer, epoch, args, device='cpu'):
     mse_criterion = torch.nn.MSELoss(reduction='mean')
     losses = AverageMeter('Loss', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.2f')
@@ -340,16 +327,13 @@ def train(train_loader, model, orig_model, criterion, optimizer, epoch, args):
     end = time.time()
     for i, (seg_map, image_ten, class_name) in enumerate(train_loader):
 
-        if torch.cuda.is_available():
-            image_ten = image_ten.cuda(args.gpu, non_blocking=True)
-            seg_map = seg_map.cuda(args.gpu, non_blocking=True)
-            class_name = class_name.cuda(args.gpu, non_blocking=True)
+        image_ten = image_ten.to(device)
+        seg_map = seg_map.to(device)
+        class_name = class_name.to(device)
 
         # segmentation loss
-        if isinstance(model, DataParallel) or isinstance(model, DistributedDataParallel):
-            relevance = generate_relevance(model.module, image_ten, index=class_name)
-        else:
-            relevance = generate_relevance(model, image_ten, index=class_name)
+        model_wo_ddp = model.module if isinstance(model, DistributedDataParallel) else model  
+        relevance = generate_relevance(model_wo_ddp, image_ten, index=class_name, device=device)
 
         reverse_seg_map = seg_map.clone()
         reverse_seg_map[reverse_seg_map == 1] = -1
@@ -373,7 +357,10 @@ def train(train_loader, model, orig_model, criterion, optimizer, epoch, args):
 
         # debugging output
         if i % args.save_interval == 0:
-            orig_relevance = generate_relevance(orig_model, image_ten, index=class_name)
+            orig_model_wo_ddp = orig_model.module if \
+                isinstance(orig_model, DistributedDataParallel) else orig_model
+            orig_relevance = generate_relevance(orig_model_wo_ddp, image_ten, \
+                index=class_name, device=device)
             for j in range(image_ten.shape[0]):
                 image = get_image_with_relevance(image_ten[j], torch.ones_like(image_ten[j]))
                 new_vis = get_image_with_relevance(image_ten[j], relevance[j])
@@ -418,7 +405,7 @@ def train(train_loader, model, orig_model, criterion, optimizer, epoch, args):
                                    epoch * len(train_loader) + i)
 
 
-def validate(val_loader, model, orig_model, criterion, epoch, args):
+def validate(val_loader, model, orig_model, criterion, epoch, args, device='cpu'):
     losses = AverageMeter('Loss', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.2f')
     top5 = AverageMeter('Acc@5', ':6.2f')
@@ -436,9 +423,8 @@ def validate(val_loader, model, orig_model, criterion, epoch, args):
         end = time.time()
         for i, (images, target) in enumerate(val_loader):
 
-            if torch.cuda.is_available():
-                images = images.cuda(args.gpu, non_blocking=True)
-                target = target.cuda(args.gpu, non_blocking=True)
+            images = images.to(device)
+            target = target.to(device)
 
             # NOTE: compute output and classification loss w.r.t class labels
             output = model(images)

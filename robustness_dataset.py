@@ -21,8 +21,8 @@ from label_str_to_imagenet_classes import label_str_to_imagenet_classes
 torch.manual_seed(0)
 
 ImageItem = collections.namedtuple('ImageItem', ('image_name', 'tag'))
-normalize = transforms.Normalize(mean=[0.5, 0.5, 0.5],
-                                 std=[0.5, 0.5, 0.5])
+normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225])
 
 transform = transforms.Compose([
     transforms.Resize(256),
