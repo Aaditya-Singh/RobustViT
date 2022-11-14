@@ -33,7 +33,6 @@ from robustness_dataset import RobustnessDataset
 # from ViT.ViT_new import vit_base_patch16_224 as vit
 # from ViT.ViT_new import vit_large_patch16_224 as vit
 
-# NOTE: DeiT class from MSN
 from ViT.helpers import load_ssl_pretrained
 from ViT.ViT import deit_base_patch16_224 as deit
 # from ViT.ViT import deit_small_patch16_224 as vit
@@ -87,7 +86,7 @@ parser.add_argument('--pretrained', dest='pretrained', type=str, default=None,
 parser.add_argument('--linear_eval', dest='linear_eval', action='store_true',
                     help='whether to finetune head only')
 parser.add_argument('--port', default=40111, type=int,
-                    help='port for launching distributed training')                           
+                    help='port for launching distributed training')
 parser.add_argument('--world-size', default=-1, type=int,
                     help='number of nodes for distributed training')
 parser.add_argument('--rank', default=-1, type=int,
@@ -126,8 +125,8 @@ parser.add_argument('--temperature', default=1, type=float,
                     help='temperature for softmax (mostly for DeiT).')
 parser.add_argument('--model_name', type=str, default='deit_small',
     help='model architecture')
-
 best_loss = float('inf')
+
 
 def main():
     args = parser.parse_args()
@@ -225,7 +224,7 @@ def main_worker(rank, port, world_size, args):
         # DistributedDataParallel will use all available devices.
         device = rank
         model.to(device)
-        orig_model.to(device)        
+        orig_model.to(device)
         model = DistributedDataParallel(model)
         orig_model = DistributedDataParallel(orig_model)
     else:

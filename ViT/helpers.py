@@ -306,7 +306,6 @@ def load_ssl_pretrained(
     if 'msn' in pretrained:
         pretrained_dict = {k.replace('module.', ''): v for k, v in checkpoint['target_encoder'].items()}
     elif 'mae' in pretrained or 'deit' in pretrained:
-        print(pretrained)
         pretrained_dict = {k.replace("module.", ""): v for k, v in checkpoint['model'].items()}
     elif 'dino' in pretrained:
         pretrained_dict = {k.replace("module.", ""): v for k, v in checkpoint.items()}
