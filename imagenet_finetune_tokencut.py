@@ -125,7 +125,7 @@ parser.add_argument('--temperature', default=1, type=float,
                     help='temperature for softmax (mostly for DeiT).')
 parser.add_argument('--model_name', type=str, default='deit_small',
     help='model architecture')
-best_loss = float('inf')
+best_top1 = 0.0
 
 
 def main():
@@ -300,13 +300,13 @@ def main_worker(rank, port, world_size, args):
         # train for one epoch
         train(train_loader, model, orig_model, criterion, optimizer, epoch, args, device)
 
-        # TODO: evaluate on validation set after every 10 (hardcoded) epochs
+        # NOTE: evaluate on validation set after every #epochs//10 epochs
         if (epoch + 1) % (args.epochs // 10) == 0:
-            loss1 = validate(val_loader, model, orig_model, criterion, epoch, args, device)
+            top1 = validate(val_loader, model, orig_model, criterion, epoch, args, device)
 
-            # remember best acc@1 and save checkpoint
-            is_best = loss1 <= best_loss
-            best_loss = min(loss1, best_loss)
+            # NOTE: remember best acc@1 and save checkpoint
+            is_best = top1 > best_top1
+            best_top1 = max(top1, best_top1)
 
             if not args.mp_distributed or (args.mp_distributed and rank == 0):
                 save_checkpoint({
