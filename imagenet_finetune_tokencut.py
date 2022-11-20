@@ -179,7 +179,7 @@ def main():
 
 
 def main_worker(rank, port, world_size, args):
-    global best_loss
+    global best_top1
 
     if args.gpu is not None:
         print("Use GPU: {} for training".format(args.gpu))
@@ -312,7 +312,7 @@ def main_worker(rank, port, world_size, args):
                 save_checkpoint({
                     'epoch': epoch + 1,
                     'state_dict': model.state_dict(),
-                    'best_loss': best_loss,
+                    'best_top1': best_top1,
                     'optimizer' : optimizer.state_dict(),
                 }, is_best, folder=args.experiment_folder)
 
