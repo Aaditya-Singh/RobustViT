@@ -303,24 +303,37 @@ def load_ssl_pretrained(
     if pretrained is None: return
     checkpoint = torch.load(pretrained, map_location='cpu')
     # -- load other pretrained weights
-    if 'msn' in pretrained:
+    if 'target_encoder' in checkpoint:  # msn
         pretrained_dict = {k.replace('module.', ''): v for k, v in checkpoint['target_encoder'].items()}
-    elif 'mae' in pretrained or 'deit' in pretrained:
+    elif 'model' in checkpoint:  # mae, deit
         pretrained_dict = {k.replace("module.", ""): v for k, v in checkpoint['model'].items()}
-    elif 'dino' in pretrained:
-        pretrained_dict = {k.replace("module.", ""): v for k, v in checkpoint.items()}
-    else:
+    elif 'state_dict' in checkpoint:
         pretrained_dict = {k.replace("module.", ""): v for k, v in checkpoint['state_dict'].items()}
+    else:  # dino
+        pretrained_dict = {k.replace("module.", ""): v for k, v in checkpoint.items()}
     for k, v in model.state_dict().items():
         if k not in pretrained_dict:
             print(f'key "{k}" could not be found in loaded state dict')
         elif pretrained_dict[k].shape != v.shape:
             print(f'key "{k}" is of different shape in model and loaded state dict')
             pretrained_dict[k] = v
-    msg = model.load_state_dict(pretrained_dict, strict=False)
+    msg = model.load_state_dict(pretrained_dict, strict=False) 
     # print(model)
     print(f'loaded pretrained model with msg: {msg}')
     try:
+        # TODO -- cleanly load head weights if keys are different in checkpoint and model
+        if 'norm.weight' in pretrained_dict:
+            model.head.norm.weight.data = pretrained_dict['norm.weight']
+            print("loaded norm weight in model head")
+        if 'norm.bias' in pretrained_dict:
+            model.head.norm.bias.data = pretrained_dict['norm.bias']
+            print("loaded norm bias in model head")
+        if 'head.weight' in pretrained_dict:
+            model.head.linear.weight.data = pretrained_dict['head.weight']
+            print("loaded linear weight in model head")
+        if 'head.bias' in pretrained_dict:
+            model.head.linear.bias.data = pretrained_dict['head.bias']
+            print("loaded linear bias in model head")        
         print(f'loaded pretrained model from epoch: {checkpoint["epoch"]} '
                     f'path: {pretrained}')
     except Exception:
