@@ -321,20 +321,16 @@ def load_ssl_pretrained(
     # print(model)
     print(f'loaded pretrained model with msg: {msg}')
     try:
-        # TODO -- cleanly load head weights if keys are different in checkpoint and model
-        if 'norm.weight' in pretrained_dict:
-            model.head.norm.weight.data = pretrained_dict['norm.weight']
-            print("loaded norm weight in model head")
-        if 'norm.bias' in pretrained_dict:
-            model.head.norm.bias.data = pretrained_dict['norm.bias']
-            print("loaded norm bias in model head")
-        if 'head.weight' in pretrained_dict:
-            model.head.linear.weight.data = pretrained_dict['head.weight']
-            print("loaded linear weight in model head")
-        if 'head.bias' in pretrained_dict:
-            model.head.linear.bias.data = pretrained_dict['head.bias']
-            print("loaded linear bias in model head")        
-        print(f'loaded pretrained model from epoch: {checkpoint["epoch"]} '
+        # NOTE: load head weights if using finetuned checkpoint but set normalize to False
+        linear_classifier_weights = {
+            'norm.weight': pretrained_dict['norm.weight'],
+            'norm.bias': pretrained_dict['norm.bias'],
+            'linear.weight': pretrained_dict['head.weight'],
+            'linear.bias': pretrained_dict['head.bias']
+        }
+        model.head.load_state_dict(linear_classifier_weights, strict=True)
+        model.head.normalize = False
+        print(f'loaded linear classifier from epoch: {checkpoint["epoch"]} '
                     f'path: {pretrained}')
     except Exception:
         pass

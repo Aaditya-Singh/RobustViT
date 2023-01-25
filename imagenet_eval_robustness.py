@@ -131,11 +131,13 @@ def main_worker(rank, port, world_size, args):
     global best_acc1
 
     if args.gpu is not None:
+        device = torch.device('cuda:0')
         print("Use GPU: {} for training".format(args.gpu))
 
     if args.mp_distributed:
         # For multiprocessing distributed training, rank needs to be the
-        # global rank among all the processes  
+        # global rank among all the processes
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(rank)
         world_size, rank = init_distributed(port=port, \
             rank_and_world_size=(rank, world_size))
 
@@ -143,14 +145,14 @@ def main_worker(rank, port, world_size, args):
     print("=> creating model")
     if args.checkpoint:
         # NOTE: Load pretrained weights and match MSN's norm and classifier
-        model = deit(pretrained=False).to(rank)
+        model = deit(pretrained=False)
         model.norm = None
         emb_dim = 384 if 'small' in args.model_name else 768 if 'base' in \
             args.model_name else 1024
         model.head = LinearClassifier(dim=emb_dim, num_labels=args.num_classes)
         load_ssl_pretrained(model, args.checkpoint)
     else:
-        model = deit(pretrained=True).to(rank)
+        model = deit(pretrained=True)
     print("=> model created")
 
     device = None
@@ -161,13 +163,12 @@ def main_worker(rank, port, world_size, args):
         # For multiprocessing distributed, DistributedDataParallel constructor
         # should always set the single device scope, otherwise,
         # DistributedDataParallel will use all available devices.
-        device = rank
+        device = torch.device('cuda:0')
         model.to(device)
         model = DistributedDataParallel(model)
     else:
         device = 'cpu'
-        model.to(device)
-        orig_model.to(device)        
+        model.to(device) 
         print('using CPU, this will be slow')
 
     cudnn.benchmark = True

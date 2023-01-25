@@ -186,14 +186,15 @@ def main_worker(rank, port, world_size, args):
 
     if args.mp_distributed:
         # For multiprocessing distributed training, rank needs to be the
-        # global rank among all the processes  
+        # global rank among all the processes
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(rank)
         world_size, rank = init_distributed(port=port, \
             rank_and_world_size=(rank, world_size))
-    
+
     # create model
     print("=> creating model")
     # NOTE: Load pretrained weights and match MSN's norm and classifier
-    model = deit(pretrained=False).to(rank)
+    model = deit(pretrained=False)
     model.norm = None
     emb_dim = 384 if 'small' in args.model_name else 768 if 'base' in \
         args.model_name else 1024
@@ -208,7 +209,7 @@ def main_worker(rank, port, world_size, args):
     print(f"=> model created with {n_params} trainable parameters")
 
     print("=> creating original model")
-    orig_model = deit(pretrained=False).to(rank)
+    orig_model = deit(pretrained=False)
     load_ssl_pretrained(orig_model, args.pretrained)
     orig_model.eval()
     print("=> original model created")
@@ -222,7 +223,7 @@ def main_worker(rank, port, world_size, args):
         # For multiprocessing distributed, DistributedDataParallel constructor
         # should always set the single device scope, otherwise,
         # DistributedDataParallel will use all available devices.
-        device = rank
+        device = torch.device('cuda:0')
         model.to(device)
         orig_model.to(device)
         model = DistributedDataParallel(model)
