@@ -1,4 +1,3 @@
-# TODO: Hardcoded start and end indices
 SS=subsets1
 NIMGS=5
 START=0
@@ -8,7 +7,7 @@ for ((INDEX=${START}; INDEX<${END}; INDEX++));
 do
     echo -e "Running TokenCut for image ${INDEX} in ${SS}/${NIMGS}imgs_class subset..."
     python tokencut_generate_segmentation.py \
-    --image-folder /srv/datasets/ImageNet/imagenet/train/ \
+    --image-folder ../datasets/ImageNet/imagenet/train/ \
     --subset-path subsets/imagenet_${SS}/${NIMGS}imgs_class.txt \
     --index ${INDEX} \
     --out-dir subsets/tokencut_${SS}/${NIMGS}imgs_class/ \

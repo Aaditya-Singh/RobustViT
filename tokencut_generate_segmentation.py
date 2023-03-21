@@ -34,7 +34,7 @@ from tokencut_image_dataset import RobustnessDataset
 
 parser = argparse.ArgumentParser(description='Generate Seg maps')
 
-parser.add_argument('--image-folder', metavar='path', default='/srv/datasets/ImageNet/imagenet/train/',
+parser.add_argument('--image-folder', metavar='path', default='../datasets/ImageNet/imagenet/train/',
                     help='imagenet folder path')
 
 parser.add_argument('--subset-path', metavar='path', default='subsets/imagenet_subsets1/1imgs_class.txt',
